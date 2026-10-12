@@ -1,11 +1,14 @@
+
 {
-  "name": "classic-us-proxy",
+  "name": "ultron-amongus-proxy",
   "version": "1.0.0",
-  "main": "server.js",
+  "private": true,
+  "type": "module",
   "scripts": {
-    "start": "node server.js"
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy"
   },
-  "dependencies": {
-    "http-proxy": "^1.18.1"
+  "devDependencies": {
+    "wrangler": "^4.0.0"
   }
 }
