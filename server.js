@@ -27,6 +27,14 @@ proxy.on('proxyReqWs', (proxyReq) => {
     proxyReq.setHeader('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
 });
 
+// Reescribir las cabeceras CORS de la respuesta de AUAD
+proxy.on('proxyRes', (proxyRes, req, res) => {
+    proxyRes.headers['access-control-allow-origin'] = '*';
+    proxyRes.headers['access-control-allow-methods'] = 'GET, POST, PUT, DELETE, OPTIONS';
+    proxyRes.headers['access-control-allow-headers'] = 'Content-Type, Authorization';
+    proxyRes.headers['access-control-allow-credentials'] = 'false';
+});
+
 proxy.on('error', (err, req, res) => {
     console.error('Proxy error:', err.message);
     if (res && res.writeHead && !res.headersSent) {
