@@ -1,6 +1,5 @@
 
 {
-  "$schema": "node_modules/wrangler/config-schema.json",
   "name": "ultron-amongus",
   "main": "src/index.js",
   "compatibility_date": "2026-10-12"
