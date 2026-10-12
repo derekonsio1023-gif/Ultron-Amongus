@@ -6,23 +6,32 @@ const TARGETS = {
 };
 
 const ALLOWED_METHODS = "GET, POST, PUT, DELETE, OPTIONS";
-const ALLOWED_HEADERS = "Content-Type, Authorization";
 
 function findTarget(pathname) {
   for (const [prefix, origin] of Object.entries(TARGETS)) {
     if (pathname === prefix || pathname.startsWith(prefix + "/")) {
-      const path = pathname.slice(prefix.length) || "/";
-      return { prefix, origin, path };
+      return {
+        origin,
+        path: pathname.slice(prefix.length) || "/",
+      };
     }
   }
-
   return null;
 }
 
-function addCors(headers) {
+function addCors(headers, request) {
   headers.set("Access-Control-Allow-Origin", "*");
   headers.set("Access-Control-Allow-Methods", ALLOWED_METHODS);
-  headers.set("Access-Control-Allow-Headers", ALLOWED_HEADERS);
+
+  const requestedHeaders = request?.headers.get(
+    "Access-Control-Request-Headers"
+  );
+
+  headers.set(
+    "Access-Control-Allow-Headers",
+    requestedHeaders || "Content-Type, Authorization"
+  );
+
   headers.delete("Access-Control-Allow-Credentials");
   return headers;
 }
@@ -32,16 +41,8 @@ function upstreamHeaders(request, websocket = false) {
 
   headers.set("Origin", "https://realauad.com");
   headers.set("Referer", "https://realauad.com/");
-  headers.set(
-    "User-Agent",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
-      "AppleWebKit/537.36 (KHTML, like Gecko) " +
-      "Chrome/120.0.0.0 Safari/537.36"
-  );
 
-  // El runtime gestiona las cabeceras del handshake WebSocket.
   if (websocket) {
-    headers.set("Upgrade", "websocket");
     headers.delete("Connection");
     headers.delete("Sec-WebSocket-Key");
     headers.delete("Sec-WebSocket-Version");
@@ -52,7 +53,10 @@ function upstreamHeaders(request, websocket = false) {
 }
 
 async function proxyHttp(request, destination) {
-  const url = new URL(destination.path + destination.search, destination.origin);
+  const url = new URL(
+    destination.path + destination.search,
+    destination.origin
+  );
 
   const init = {
     method: request.method,
@@ -65,18 +69,17 @@ async function proxyHttp(request, destination) {
   }
 
   const upstream = await fetch(url, init);
-  const headers = addCors(new Headers(upstream.headers));
+  const headers = addCors(new Headers(upstream.headers), request);
 
   return new Response(upstream.body, {
     status: upstream.status,
-    statusText: upstream.statusText,
     headers,
   });
 }
 
 function bridgeWebSockets(clientSocket, serverSocket, upstreamSocket) {
-  serverSocket.accept({ allowHalfOpen: true });
-  upstreamSocket.accept({ allowHalfOpen: true });
+  serverSocket.accept();
+  upstreamSocket.accept();
 
   let closing = false;
 
@@ -97,7 +100,7 @@ function bridgeWebSockets(clientSocket, serverSocket, upstreamSocket) {
     } catch {}
   }
 
-  serverSocket.addEventListener("message", (event) => {
+  serverSocket.addEventListener("message", event => {
     try {
       if (upstreamSocket.readyState === WebSocket.OPEN) {
         upstreamSocket.send(event.data);
@@ -107,7 +110,7 @@ function bridgeWebSockets(clientSocket, serverSocket, upstreamSocket) {
     }
   });
 
-  upstreamSocket.addEventListener("message", (event) => {
+  upstreamSocket.addEventListener("message", event => {
     try {
       if (serverSocket.readyState === WebSocket.OPEN) {
         serverSocket.send(event.data);
@@ -117,20 +120,28 @@ function bridgeWebSockets(clientSocket, serverSocket, upstreamSocket) {
     }
   });
 
-  serverSocket.addEventListener("close", (event) => {
+  serverSocket.addEventListener("close", event => {
     closeBoth(event.code, event.reason);
   });
 
-  upstreamSocket.addEventListener("close", (event) => {
+  upstreamSocket.addEventListener("close", event => {
     closeBoth(event.code, event.reason);
   });
 
-  serverSocket.addEventListener("error", () => closeBoth(1011, "Client error"));
-  upstreamSocket.addEventListener("error", () => closeBoth(1011, "Upstream error"));
+  serverSocket.addEventListener("error", () => {
+    closeBoth(1011, "Client error");
+  });
+
+  upstreamSocket.addEventListener("error", () => {
+    closeBoth(1011, "Upstream error");
+  });
 }
 
 async function proxyWebSocket(request, destination) {
-  const url = new URL(destination.path + destination.search, destination.origin);
+  const url = new URL(
+    destination.path + destination.search,
+    destination.origin
+  );
 
   const upstreamResponse = await fetch(url, {
     headers: upstreamHeaders(request, true),
@@ -141,12 +152,16 @@ async function proxyWebSocket(request, destination) {
   if (upstreamResponse.status !== 101 || !upstreamSocket) {
     return new Response(
       `Upstream WebSocket rejected the handshake (HTTP ${upstreamResponse.status})`,
-      { status: 502 }
+      {
+        status: 502,
+        headers: addCors(new Headers(), request),
+      }
     );
   }
 
-  const [clientSocket, serverSocket] =
-    Object.values(new WebSocketPair());
+  const pair = new WebSocketPair();
+  const clientSocket = pair[0];
+  const serverSocket = pair[1];
 
   bridgeWebSockets(clientSocket, serverSocket, upstreamSocket);
 
@@ -162,34 +177,36 @@ export default {
     const destination = findTarget(url.pathname);
 
     if (!destination) {
-      return new Response("Not found", { status: 404 });
+      return new Response("Not found", {
+        status: 404,
+        headers: addCors(new Headers(), request),
+      });
     }
 
     if (request.method === "OPTIONS") {
       return new Response(null, {
         status: 204,
-        headers: addCors(new Headers()),
+        headers: addCors(new Headers(), request),
       });
     }
 
     try {
-      if (request.headers.get("Upgrade")?.toLowerCase() === "websocket") {
-        return await proxyWebSocket(request, {
-          ...destination,
-          search: url.search,
-        });
-      }
-
-      return await proxyHttp(request, {
+      const target = {
         ...destination,
         search: url.search,
-      });
+      };
+
+      if (request.headers.get("Upgrade")?.toLowerCase() === "websocket") {
+        return await proxyWebSocket(request, target);
+      }
+
+      return await proxyHttp(request, target);
     } catch (error) {
       console.error("Proxy error:", error);
 
       return new Response("Bad Gateway", {
         status: 502,
-        headers: addCors(new Headers()),
+        headers: addCors(new Headers(), request),
       });
     }
   },
