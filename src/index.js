@@ -46,116 +46,105 @@ function upstreamHeaders(request, websocket = false) {
   return headers;
 }
 
-async function proxyHttp(request, destination, search) {
-  const url = new URL(destination.path + search, destination.origin);
-  const init = {
-    method: request.method,
-    headers: upstreamHeaders(request),
-    redirect: "manual",
-  };
-  if (request.method !== "GET" && request.method !== "HEAD") {
-    init.body = request.body;
-  }
+async function handleRequest(request) {
+  const url = new URL(request.url);
+  const upgrade = (request.headers.get("Upgrade") || "").toLowerCase();
+  const isWebSocket = upgrade === "websocket";
+  const destination = findTarget(url.pathname, isWebSocket);
 
-  const upstream = await fetch(url, init);
-  const headers = new Headers(upstream.headers);
-  headers.delete("content-encoding");
-  headers.delete("content-length");
-  headers.delete("transfer-encoding");
-  headers.delete("connection");
-  addCors(headers, request);
+  console.log("REQ", request.method, url.pathname, "ws=" + isWebSocket);
 
-  return new Response(upstream.body, {
-    status: upstream.status,
-    statusText: upstream.statusText,
-    headers,
-  });
-}
-
-async function proxyWebSocket(request, destination, search) {
-  const url = new URL(destination.path + search, destination.origin);
-
-  const upstreamResponse = await fetch(url, {
-    headers: upstreamHeaders(request, true),
-  });
-
-  const upstreamSocket = upstreamResponse.webSocket;
-  if (upstreamResponse.status !== 101 || !upstreamSocket) {
+  if (!destination) {
     const headers = new Headers();
     addCors(headers, request);
-    return new Response(
-      `Upstream WebSocket rejected (HTTP ${upstreamResponse.status})`,
-      { status: 502, headers }
-    );
+    return new Response("Not found: " + url.pathname, { status: 404, headers });
   }
 
-  const { socket: clientSocket, response } = Deno.upgradeWebSocket(request);
-  const serverSocket = clientSocket;
+  if (request.method === "OPTIONS") {
+    const headers = new Headers();
+    addCors(headers, request);
+    return new Response(null, { status: 204, headers });
+  }
 
-  upstreamSocket.accept();
+  try {
+    if (isWebSocket) {
+      // WebSocket: usar Deno.upgradeWebSocket
+      const upstreamUrl = new URL(destination.path + url.search, destination.origin);
+      console.log("WS upstream ->", upstreamUrl.href);
 
-  serverSocket.addEventListener("message", (event) => {
-    try {
-      if (upstreamSocket.readyState === WebSocket.OPEN) {
-        upstreamSocket.send(event.data);
+      const upstreamResponse = await fetch(upstreamUrl, {
+        headers: upstreamHeaders(request, true),
+      });
+
+      if (upstreamResponse.status !== 101 || !upstreamResponse.webSocket) {
+        const headers = new Headers();
+        addCors(headers, request);
+        return new Response(
+          "Upstream WS rejected: " + upstreamResponse.status,
+          { status: 502, headers }
+        );
       }
-    } catch (e) {
-      console.error("Client→Upstream error:", e);
+
+      const upstreamSocket = upstreamResponse.webSocket;
+      const { socket: clientSocket, response } = Deno.upgradeWebSocket(request);
+
+      upstreamSocket.accept();
+
+      clientSocket.addEventListener("message", (e) => {
+        try {
+          if (upstreamSocket.readyState === 1) upstreamSocket.send(e.data);
+        } catch (err) { console.error("C→U:", err); }
+      });
+
+      upstreamSocket.addEventListener("message", (e) => {
+        try {
+          if (clientSocket.readyState === 1) clientSocket.send(e.data);
+        } catch (err) { console.error("U→C:", err); }
+      });
+
+      clientSocket.addEventListener("close", () => {
+        try { upstreamSocket.close(); } catch {}
+      });
+      upstreamSocket.addEventListener("close", () => {
+        try { clientSocket.close(); } catch {}
+      });
+
+      return response;
     }
-  });
 
-  upstreamSocket.addEventListener("message", (event) => {
-    try {
-      if (serverSocket.readyState === WebSocket.OPEN) {
-        serverSocket.send(event.data);
-      }
-    } catch (e) {
-      console.error("Upstream→Client error:", e);
+    // HTTP normal
+    const upstreamUrl = new URL(destination.path + url.search, destination.origin);
+    const init = {
+      method: request.method,
+      headers: upstreamHeaders(request),
+      redirect: "manual",
+    };
+    if (request.method !== "GET" && request.method !== "HEAD") {
+      init.body = request.body;
     }
-  });
 
-  serverSocket.addEventListener("close", () => {
-    try { upstreamSocket.close(); } catch {}
-  });
-  upstreamSocket.addEventListener("close", () => {
-    try { serverSocket.close(); } catch {}
-  });
+    const upstream = await fetch(upstreamUrl, init);
+    const headers = new Headers(upstream.headers);
+    headers.delete("content-encoding");
+    headers.delete("content-length");
+    headers.delete("transfer-encoding");
+    headers.delete("connection");
+    addCors(headers, request);
 
-  return response;
+    return new Response(upstream.body, {
+      status: upstream.status,
+      statusText: upstream.statusText,
+      headers,
+    });
+  } catch (error) {
+    console.error("Proxy error:", error);
+    const headers = new Headers();
+    addCors(headers, request);
+    return new Response("Bad Gateway: " + (error?.message || String(error)), {
+      status: 502,
+      headers,
+    });
+  }
 }
 
-export default {
-  async fetch(request) {
-    const url = new URL(request.url);
-    const isWebSocket =
-      (request.headers.get("Upgrade") || "").toLowerCase() === "websocket";
-    const destination = findTarget(url.pathname, isWebSocket);
-
-    if (!destination) {
-      const headers = new Headers();
-      addCors(headers, request);
-      return new Response("Not found", { status: 404, headers });
-    }
-
-    if (request.method === "OPTIONS") {
-      const headers = new Headers();
-      addCors(headers, request);
-      return new Response(null, { status: 204, headers });
-    }
-
-    try {
-      if (isWebSocket) {
-        return await proxyWebSocket(request, destination, url.search);
-      }
-      return await proxyHttp(request, destination, url.search);
-    } catch (error) {
-      console.error("Proxy error:", error);
-      const headers = new Headers();
-      addCors(headers, request);
-      return new Response("Bad Gateway: " + (error?.message || error), {
-        status: 502,
-        headers,
-      });
-    }
-  },
-};
+Deno.serve(handleRequest);
