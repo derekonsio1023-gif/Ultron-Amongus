@@ -37,6 +37,7 @@ function upstreamHeaders(request, websocket = false) {
   const headers = new Headers(request.headers);
   headers.set("Origin", "https://realauad.com");
   headers.set("Referer", "https://realauad.com/");
+  headers.set("Accept-Encoding", "identity");   // <-- AÑADE ESTA LÍNEA
   if (websocket) {
     headers.delete("Connection");
     headers.delete("Sec-WebSocket-Key");
